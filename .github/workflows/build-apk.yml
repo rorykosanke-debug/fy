@@ -1,0 +1,697 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        run: |
+          SDK="$ANDROID_HOME"
+          if [ -z "$SDK" ]; then SDK="/usr/local/lib/android/sdk"; fi
+          echo "SDK=$SDK"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          "$SDK/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null 2>&1 <<< "y" || true
+          "$SDK/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0" "platform-tools" >/dev/null 2>&1 || true
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
+
+      - name: Ensure Gradle available
+        run: |
+          if command -v gradle >/dev/null 2>&1; then
+            gradle -v
+          else
+            cd /tmp
+            curl -sSL -o gradle.zip https://services.gradle.org/distributions/gradle-8.7-bin.zip
+            unzip -q -o gradle.zip
+            echo "/tmp/gradle-8.7/bin" >> "$GITHUB_PATH"
+            export PATH="/tmp/gradle-8.7/bin:$PATH"
+            gradle -v
+          fi
+
+      - name: Generate project files
+        run: |
+          set -e
+          cat > 'settings.gradle.kts' <<'__FANYI_FILE_EOF__'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "FanyiFloat"
+          include(":app")
+          __FANYI_FILE_EOF__
+          cat > 'build.gradle.kts' <<'__FANYI_FILE_EOF__'
+          plugins {
+              id("com.android.application") version "8.2.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.22" apply false
+          }
+          __FANYI_FILE_EOF__
+          cat > 'gradle.properties' <<'__FANYI_FILE_EOF__'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          android.nonTransitiveRClass=true
+          __FANYI_FILE_EOF__
+          mkdir -p 'app'
+          cat > 'app/build.gradle.kts' <<'__FANYI_FILE_EOF__'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          
+          android {
+              namespace = "com.rorykosanke.fanyifloat"
+              compileSdk = 34
+          
+              defaultConfig {
+                  applicationId = "com.rorykosanke.fanyifloat"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+          
+              buildTypes {
+                  release {
+                      isMinifyEnabled = false
+                  }
+              }
+          
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+          
+          dependencies {
+              // 端侧文字识别（模型打包进 APK，不依赖 Google 服务，离线可用）
+              implementation("com.google.mlkit:text-recognition:16.0.0")
+              implementation("com.google.mlkit:text-recognition-chinese:16.0.0")
+              // 网络请求（调用 DeepSeek）
+              implementation("com.squareup.okhttp3:okhttp:4.12.0")
+          }
+          __FANYI_FILE_EOF__
+          mkdir -p 'app/src/main'
+          cat > 'app/src/main/AndroidManifest.xml' <<'__FANYI_FILE_EOF__'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+          
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+          
+              <application
+                  android:allowBackup="true"
+                  android:label="悬浮翻译"
+                  android:icon="@drawable/ic_launcher"
+                  android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar">
+          
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+          
+                  <service
+                      android:name=".OverlayService"
+                      android:exported="false"
+                      android:foregroundServiceType="mediaProjection" />
+              </application>
+          </manifest>
+          __FANYI_FILE_EOF__
+          mkdir -p 'app/src/main/res/drawable'
+          cat > 'app/src/main/res/drawable/ic_launcher.xml' <<'__FANYI_FILE_EOF__'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp"
+              android:height="108dp"
+              android:viewportWidth="108"
+              android:viewportHeight="108">
+              <path
+                  android:fillColor="#16A34A"
+                  android:pathData="M0,0h108v108h-108z" />
+              <path
+                  android:fillColor="#FFFFFF"
+                  android:pathData="M54,20 C34,20 20,32 20,48 C20,58 27,66 37,71 L33,86 L50,77 C51,77 52,77 54,77 C74,77 88,65 88,48 C88,32 74,20 54,20 Z" />
+              <path
+                  android:fillColor="#16A34A"
+                  android:pathData="M42,36 h24 v7 h-8.5 v24 h-7 v-24 h-8.5 z" />
+          </vector>
+          __FANYI_FILE_EOF__
+          mkdir -p 'app/src/main/java/com/rorykosanke/fanyifloat'
+          cat > 'app/src/main/java/com/rorykosanke/fanyifloat/Prefs.kt' <<'__FANYI_FILE_EOF__'
+          package com.rorykosanke.fanyifloat
+          
+          import android.content.Context
+          
+          /** 简单的本地设置存储：API Key、目标语言。 */
+          object Prefs {
+              private const val NAME = "settings"
+              private const val KEY_API = "deepseek_api_key"
+              private const val KEY_TARGET = "target_lang"
+              private const val KEY_SEL = "sel_bounds"
+          
+              private fun sp(c: Context) = c.getSharedPreferences(NAME, Context.MODE_PRIVATE)
+          
+              fun getApiKey(c: Context): String = sp(c).getString(KEY_API, "").orEmpty()
+              fun setApiKey(c: Context, v: String) {
+                  sp(c).edit().putString(KEY_API, v.trim()).apply()
+              }
+          
+              fun getTarget(c: Context): String = sp(c).getString(KEY_TARGET, "简体中文").orEmpty()
+              fun setTarget(c: Context, v: String) {
+                  sp(c).edit().putString(KEY_TARGET, v.trim().ifBlank { "简体中文" }).apply()
+              }
+          
+              fun saveSelBounds(c: Context, x: Int, y: Int, w: Int, h: Int) {
+                  sp(c).edit().putString(KEY_SEL, "$x,$y,$w,$h").apply()
+              }
+          
+              fun getSelBounds(c: Context): IntArray? {
+                  val s = sp(c).getString(KEY_SEL, null) ?: return null
+                  val p = s.split(",")
+                  if (p.size != 4) return null
+                  return try {
+                      intArrayOf(p[0].toInt(), p[1].toInt(), p[2].toInt(), p[3].toInt())
+                  } catch (e: Exception) {
+                      null
+                  }
+              }
+          }
+          __FANYI_FILE_EOF__
+          mkdir -p 'app/src/main/java/com/rorykosanke/fanyifloat'
+          cat > 'app/src/main/java/com/rorykosanke/fanyifloat/DeepSeek.kt' <<'__FANYI_FILE_EOF__'
+          package com.rorykosanke.fanyifloat
+          
+          import okhttp3.Call
+          import okhttp3.Callback
+          import okhttp3.MediaType.Companion.toMediaType
+          import okhttp3.OkHttpClient
+          import okhttp3.Request
+          import okhttp3.RequestBody.Companion.toRequestBody
+          import okhttp3.Response
+          import org.json.JSONArray
+          import org.json.JSONObject
+          import java.io.IOException
+          import java.util.concurrent.TimeUnit
+          
+          /** 调用 DeepSeek 的 Chat Completions 接口做翻译。 */
+          object DeepSeek {
+          
+              private val client = OkHttpClient.Builder()
+                  .connectTimeout(20, TimeUnit.SECONDS)
+                  .readTimeout(60, TimeUnit.SECONDS)
+                  .build()
+          
+              private val JSON = "application/json; charset=utf-8".toMediaType()
+          
+              /**
+               * 把 [text] 翻译成 [target]，结果（或错误提示）通过 [onResult] 回调。
+               * 注意：onResult 在 OkHttp 的后台线程里执行，UI 更新请自行 post 到主线程。
+               */
+              fun translate(apiKey: String, target: String, text: String, onResult: (String) -> Unit) {
+                  if (apiKey.isBlank()) {
+                      onResult("❗ 未填写 DeepSeek API Key，请回 App 里设置")
+                      return
+                  }
+                  if (text.isBlank()) {
+                      onResult("（没有识别到文字）")
+                      return
+                  }
+          
+                  val messages = JSONArray()
+                  messages.put(JSONObject().put("role", "system")
+                      .put("content", "你是一个只输出译文的翻译引擎。只输出翻译结果，不要解释、不要拼音、不要加引号。"))
+                  messages.put(JSONObject().put("role", "user")
+                      .put("content", "把下面的内容翻译成${target}，只输出译文：\n\n$text"))
+          
+                  val bodyJson = JSONObject()
+                      .put("model", "deepseek-chat")
+                      .put("messages", messages)
+                      .put("stream", false)
+                      .put("temperature", 0.2)
+                      .toString()
+          
+                  val request = Request.Builder()
+                      .url("https://api.deepseek.com/chat/completions")
+                      .header("Authorization", "Bearer $apiKey")
+                      .post(bodyJson.toRequestBody(JSON))
+                      .build()
+          
+                  client.newCall(request).enqueue(object : Callback {
+                      override fun onFailure(call: Call, e: IOException) {
+                          onResult("❗ 网络错误：${e.message ?: "连接失败"}")
+                      }
+          
+                      override fun onResponse(call: Call, response: Response) {
+                          response.use { resp ->
+                              val raw = resp.body?.string().orEmpty()
+                              if (!resp.isSuccessful) {
+                                  onResult("❗ 接口错误 ${resp.code}：${raw.take(200)}")
+                                  return
+                              }
+                              try {
+                                  val content = JSONObject(raw)
+                                      .getJSONArray("choices")
+                                      .getJSONObject(0)
+                                      .getJSONObject("message")
+                                      .getString("content")
+                                      .trim()
+                                  onResult(content)
+                              } catch (e: Exception) {
+                                  onResult("❗ 解析失败：${raw.take(200)}")
+                              }
+                          }
+                      }
+                  })
+              }
+          }
+          __FANYI_FILE_EOF__
+          mkdir -p 'app/src/main/java/com/rorykosanke/fanyifloat'
+          cat > 'app/src/main/java/com/rorykosanke/fanyifloat/Ocr.kt' <<'__FANYI_FILE_EOF__'
+          package com.rorykosanke.fanyifloat
+          
+          import android.graphics.Bitmap
+          import com.google.mlkit.vision.common.InputImage
+          import com.google.mlkit.vision.text.TextRecognition
+          import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
+          import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+          
+          /** 端侧 OCR：同时用「拉丁文模型」和「中文模型」识别，取更合适的结果。 */
+          object Ocr {
+          
+              private val latin = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+              private val chinese = TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
+          
+              fun recognize(bitmap: Bitmap, onText: (String) -> Unit) {
+                  val image = InputImage.fromBitmap(bitmap, 0)
+          
+                  var latinText: String? = null
+                  var chineseText: String? = null
+                  var remaining = 2
+          
+                  fun done() {
+                      val cjk = chineseText
+                      val result = if (!cjk.isNullOrBlank() && cjk.any { isCJK(it) }) {
+                          // 画面里有中日韩文字，用中文模型的结果（它也能读英文）
+                          cjk
+                      } else {
+                          // 纯英文/数字场景，拉丁模型更准
+                          if (!latinText.isNullOrBlank()) latinText!! else (cjk ?: "")
+                      }
+                      onText(result.trim())
+                  }
+          
+                  latin.process(image).addOnCompleteListener { task ->
+                      latinText = try { task.result.text } catch (e: Exception) { "" }
+                      remaining -= 1
+                      if (remaining == 0) done()
+                  }
+                  chinese.process(image).addOnCompleteListener { task ->
+                      chineseText = try { task.result.text } catch (e: Exception) { "" }
+                      remaining -= 1
+                      if (remaining == 0) done()
+                  }
+              }
+          
+              private fun isCJK(c: Char): Boolean {
+                  val b = c.code
+                  return (b in 0x4E00..0x9FFF) ||   // 汉字
+                          (b in 0x3040..0x30FF) ||  // 日文假名
+                          (b in 0xAC00..0xD7AF)     // 韩文
+              }
+          }
+          __FANYI_FILE_EOF__
+          mkdir -p 'app/src/main/java/com/rorykosanke/fanyifloat'
+          cat > 'app/src/main/java/com/rorykosanke/fanyifloat/OverlayService.kt' <<'__FANYI_FILE_EOF__'
+          package com.rorykosanke.fanyifloat
+          
+          import android.app.Activity
+          import android.app.Notification
+          import android.content.ClipData
+          import android.content.ClipboardManager
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.Service
+          import android.content.Context
+          import android.content.Intent
+          import android.content.pm.ServiceInfo
+          import android.graphics.Bitmap
+          import android.graphics.PixelFormat
+          import android.graphics.drawable.GradientDrawable
+          import android.hardware.display.DisplayManager
+          import android.hardware.display.VirtualDisplay
+          import android.media.Image
+          import android.media.ImageReader
+          import android.media.projection.MediaProjection
+          import android.media.projection.MediaProjectionManager
+          import android.os.Build
+          import android.os.Handler
+          import android.os.IBinder
+          import android.os.Looper
+          import android.util.DisplayMetrics
+          import android.view.Gravity
+          import android.view.MotionEvent
+          import android.view.View
+          import android.view.WindowManager
+          import android.widget.FrameLayout
+          import android.widget.LinearLayout
+          import android.widget.TextView
+          import java.util.concurrent.Executors
+          import kotlin.math.abs
+          
+          /**
+           * 悬浮翻译服务：
+           *  - 一个可拖动/可缩放的「选区框」盖在视频上
+           *  - 一个可拖动的按钮列（译 / 设 / 关）
+           *  - 点「译」→ 截取选区 → OCR → 调 DeepSeek 翻译 → 显示在框下方
+           */
+          class OverlayService : Service() {
+          
+              private lateinit var wm: WindowManager
+              private val mainHandler = Handler(Looper.getMainLooper())
+              private val captureExec = Executors.newSingleThreadExecutor()
+          
+              private var projection: MediaProjection? = null
+              private var virtualDisplay: VirtualDisplay? = null
+              private var imageReader: ImageReader? = null
+          
+              private var screenW = 0
+              private var screenH = 0
+              private var screenDensity = 0
+          
+              private var selectionView: FrameLayout? = null
+              private var selParams: WindowManager.LayoutParams? = null
+              private var controlView: LinearLayout? = null
+              private var resultView: TextView? = null
+              private var selHandle: View? = null
+              private var selBg: android.graphics.drawable.Drawable? = null
+          
+              private var busy = false
+          
+              override fun onBind(intent: Intent?): IBinder? = null
+          
+              override fun onCreate() {
+                  super.onCreate()
+                  wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+              }
+          
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  if (intent == null || intent.getStringExtra("action") == "stop") {
+                      stopSelf()
+                      return START_NOT_STICKY
+                  }
+          
+                  // 1) 必须先进入前台（Android 14 要求 mediaProjection 前台服务早于使用投屏）
+                  startForegroundInternal()
+          
+                  val code = intent.getIntExtra("code", Activity.RESULT_CANCELED)
+                  @Suppress("DEPRECATION")
+                  val data = intent.getParcelableExtra<Intent>("data")
+                  if (code != Activity.RESULT_OK || data == null) {
+                      stopSelf()
+                      return START_NOT_STICKY
+                  }
+          
+                  if (projection == null) {
+                      try {
+                          setupProjection(code, data)
+                      } catch (e: Exception) {
+                          e.printStackTrace()
+                          stopSelf()
+                      }
+                  }
+                  return START_NOT_STICKY
+              }
+          
+              // ---------------- 前台通知 ----------------
+              private fun startForegroundInternal() {
+                  val channelId = "fanyi_channel"
+                  val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      nm.createNotificationChannel(
+                          NotificationChannel(channelId, "悬浮翻译", NotificationManager.IMPORTANCE_LOW)
+                      )
+                  }
+                  val notification: Notification = Notification.Builder(this, channelId)
+                      .setContentTitle("悬浮翻译运行中")
+                      .setContentText("点悬浮按钮「译」翻译选区文字")
+                      .setSmallIcon(android.R.drawable.ic_menu_search)
+                      .setOngoing(true)
+                      .build()
+          
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                      startForeground(
+                          NOTIF_ID, notification,
+                          ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                      )
+                  } else {
+                      startForeground(NOTIF_ID, notification)
+                  }
+              }
+          
+              // ---------------- 投屏 + 截屏 ----------------
+              private fun setupProjection(code: Int, data: Intent) {
+                  val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                  projection = mpm.getMediaProjection(code, data)
+          
+                  val size = realScreenSize()
+                  screenW = size[0]
+                  screenH = size[1]
+                  screenDensity = resources.displayMetrics.densityDpi
+          
+                  imageReader = ImageReader.newInstance(screenW, screenH, PixelFormat.RGBA_8888, 2)
+          
+                  projection?.registerCallback(object : MediaProjection.Callback() {
+                      override fun onStop() {
+                          stopSelf()
+                      }
+                  }, mainHandler)
+          
+                  virtualDisplay = projection?.createVirtualDisplay(
+                      "fanyi_cap",
+                      screenW, screenH, screenDensity,
+                      DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                      imageReader?.surface, null, mainHandler
+                  )
+          
+                  buildOverlays()
+              }
+          
+              private fun realScreenSize(): IntArray {
+                  return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                      val b = wm.maximumWindowMetrics.bounds
+                      intArrayOf(b.width(), b.height())
+                  } else {
+                      val dm = DisplayMetrics()
+                      @Suppress("DEPRECATION")
+                      wm.defaultDisplay.getRealMetrics(dm)
+                      intArrayOf(dm.widthPixels, dm.heightPixels)
+                  }
+              }
+          
+              // ---------------- 悬浮 UI ----------------
+              private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+          
+              private fun buildOverlays() {
+                  buildSelection()
+                  buildResult()
+                  buildControl()
+              }
+          
+              private fun buildSelection() {
+                  val sel = FrameLayout(this)
+                  sel.background = GradientDrawable().apply {
+                      setColor(0x1A22C55E)
+                      setStroke(dp(2), 0xFF22C55E.toInt())
+                      cornerRadius = dp(6).toFloat()
+                  }
+                  selBg = sel.background
+          
+                  // 右下角缩放把手
+                  val handle = View(this)
+                  val hp = FrameLayout.LayoutParams(dp(26), dp(26), Gravity.END or Gravity.BOTTOM)
+                  handle.layoutParams = hp
+                  handle.background = GradientDrawable().apply {
+                      setColor(0xFF22C55E.toInt())
+                      cornerRadius = dp(6).toFloat()
+                  }
+                  sel.addView(handle)
+                  selHandle = handle
+          
+                  // 恢复上次的框位置/大小；没有则用默认
+                  val saved = Prefs.getSelBounds(this)
+                  var sw = (screenW * 0.82).toInt()
+                  var sh = (screenH * 0.14).toInt()
+                  var sx = (screenW * 0.09).toInt()
+                  var sy = (screenH * 0.62).toInt()
+                  if (saved != null) {
+                      sw = saved[2].coerceIn(dp(120), screenW)
+                      sh = saved[3].coerceIn(dp(50), screenH)
+                      sx = saved[0].coerceIn(0, (screenW - sw).coerceAtLeast(0))
+                      sy = saved[1].coerceIn(0, (screenH - sh).coerceAtLeast(0))
+                  }
+                  val sp = WindowManager.LayoutParams(
+                      sw, sh,
+                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                              WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                      PixelFormat.TRANSLUCENT
+                  )
+                  sp.gravity = Gravity.TOP or Gravity.START
+                  sp.x = sx
+                  sp.y = sy
+                  selParams = sp
+          
+                  sel.setOnTouchListener(object : View.OnTouchListener {
+                      var startRawX = 0
+                      var startRawY = 0
+                      var startW = 0
+                      var startH = 0
+                      var startX = 0
+                      var startY = 0
+                      var resizing = false
+          
+                      override fun onTouch(v: View, e: MotionEvent): Boolean {
+                          when (e.actionMasked) {
+                              MotionEvent.ACTION_DOWN -> {
+                                  startRawX = e.rawX.toInt()
+                                  startRawY = e.rawY.toInt()
+                                  startW = sp.width
+                                  startH = sp.height
+                                  startX = sp.x
+                                  startY = sp.y
+                                  resizing = e.x > sp.width - dp(42) && e.y > sp.height - dp(42)
+                                  return true
+                              }
+                              MotionEvent.ACTION_MOVE -> {
+                                  val dx = e.rawX.toInt() - startRawX
+                                  val dy = e.rawY.toInt() - startRawY
+                                  if (resizing) {
+                                      sp.width = (startW + dx).coerceAtLeast(dp(120))
+                                      sp.height = (startH + dy).coerceAtLeast(dp(50))
+                                  } else {
+                                      sp.x = startX + dx
+                                      sp.y = startY + dy
+                                  }
+                                  safeUpdate(sel, sp)
+                                  positionResult()
+                                  return true
+                              }
+                              MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                                  Prefs.saveSelBounds(this@OverlayService, sp.x, sp.y, sp.width, sp.height)
+                                  return true
+                              }
+                          }
+                          return false
+                      }
+                  })
+          
+                  try {
+                      wm.addView(sel, sp)
+                      selectionView = sel
+                  } catch (e: Exception) {
+                      e.printStackTrace()
+                  }
+              }
+          
+              private fun buildResult() {
+                  val rv = TextView(this)
+                  rv.setTextColor(0xFFFFFFFF.toInt())
+                  rv.textSize = 15f
+                  rv.setPadding(dp(10), dp(8), dp(10), dp(8))
+                  rv.background = GradientDrawable().apply {
+                      setColor(0xD9000000.toInt())
+                      cornerRadius = dp(8).toFloat()
+                  }
+                  val rp = WindowManager.LayoutParams(
+                      dp(220), WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                              WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                      PixelFormat.TRANSLUCENT
+                  )
+                  rp.gravity = Gravity.TOP or Gravity.START
+                  rp.x = dp(10)
+                  rp.y = dp(10)
+                  rv.isClickable = true
+                  rv.setOnClickListener {
+                      try {
+                          val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                          cm.setPrimaryClip(ClipData.newPlainText("翻译", rv.text))
+                      } catch (e: Exception) {
+                      }
+                  }
+                  try {
+                      wm.addView(rv, rp)
+                      resultView = rv
+                      positionResult()
+                  } catch (e: Exception) {
+                      e.printStackTrace()
+                  }
+              }
+          
+              private fun buildControl() {
+                  val cv = LinearLayout(this)
+                  cv.orientation = LinearLayout.VERTICAL
+                  cv.setPadding(dp(4), dp(4), dp(4), dp(4))
+                  cv.background = GradientDrawable().apply {
+                      setColor(0xE6111827.toInt())
+                      cornerRadius = dp(16).toFloat()
+                  }
+          
+                  val cp = WindowManager.LayoutParams(
+                      WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                      PixelFormat.TRANSLUCENT
+                  )
+                  cp.gravity = Gravity.TOP or Gravity.START
+                  cp.x = dp(8)
+                  cp.y = dp(140)
+          
+                  // 拖动把手
+                  val handle = TextView(this)
+                  handle.text = "⋮"
+                  handle.setTextColor(0xFF8EA1BD.toInt())
+                  handle.textSize = 14f
+                  handle.gravity = Gravity.CENTER
+                  handle.layoutParams = LinearLayout.LayoutParams(dp(48), dp(20))
+                  handle.setOnTouchLis
